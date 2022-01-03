@@ -1,5 +1,5 @@
 /*
-Copyright 2021 CodeNotary, Inc. All rights reserved.
+Copyright 2022 CodeNotary, Inc. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ import (
 
 	"github.com/codenotary/immudb/embedded/tbtree"
 	"github.com/codenotary/immudb/embedded/watchers"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type indexer struct {
@@ -51,6 +53,21 @@ const (
 	running runningState = iota
 	stopped
 	paused
+)
+
+var (
+	metricsIndexingLastIndexed = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "immudb_indexed_trx_id",
+		Help: "The highest id of indexed transaction",
+	}, []string{
+		"path",
+	})
+	metricsIndexingMaxTrx = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "immudb_max_trx_id",
+		Help: "The highest id of committed transaction",
+	}, []string{
+		"path",
+	})
 )
 
 func newIndexer(path string, store *ImmuStore, indexOpts *tbtree.Options, maxWaitees int) (*indexer, error) {
@@ -286,6 +303,7 @@ func (idx *indexer) doIndexing(cancellation <-chan struct{}) {
 		}
 
 		committedTxID, _, _ := idx.store.commitState()
+		metricsIndexingMaxTrx.WithLabelValues(idx.path).Set(float64(committedTxID))
 
 		txsToIndex := committedTxID - lastIndexedTx
 		idx.store.notify(Info, false, "%d transaction/s to be indexed at '%s'", txsToIndex, idx.store.path)
@@ -381,6 +399,8 @@ func (idx *indexer) indexSince(txID uint64, limit int) error {
 		if err != nil {
 			return err
 		}
+
+		metricsIndexingLastIndexed.WithLabelValues(idx.path).Set(float64(txID + uint64(i)))
 	}
 
 	return nil
