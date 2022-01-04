@@ -1,5 +1,5 @@
 /*
-Copyright 2021 CodeNotary, Inc. All rights reserved.
+Copyright 2022 CodeNotary, Inc. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/codenotary/immudb/pkg/server/sessions"
 	"io/ioutil"
 	"log"
 	"net"
@@ -30,6 +29,8 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"github.com/codenotary/immudb/pkg/server/sessions"
 
 	"github.com/codenotary/immudb/embedded/remotestorage"
 	"github.com/codenotary/immudb/embedded/store"
@@ -102,6 +103,8 @@ func (s *ImmuServer) Initialize() error {
 	if err != nil {
 		return logErr(s.Logger, "Unable to create data dir: %v", err)
 	}
+
+	s.metricsCollection = s.createMetricsCollection()
 
 	remoteStorage, err := s.createRemoteStorageInstance()
 	if err != nil {
@@ -178,7 +181,7 @@ func (s *ImmuServer) Initialize() error {
 
 	auth.AuthEnabled = s.Options.GetAuth()
 	auth.DevMode = s.Options.DevMode
-	auth.UpdateMetrics = func(ctx context.Context) { Metrics.UpdateClientMetrics(ctx) }
+	auth.UpdateMetrics = func(ctx context.Context) { s.metricsCollection.UpdateClientMetrics(ctx) }
 
 	if err = s.setupPidFile(); err != nil {
 		return err
@@ -325,14 +328,22 @@ func (s *ImmuServer) setupPidFile() error {
 	return err
 }
 
+func (s *ImmuServer) createMetricsCollection() *MetricsCollection {
+	if s.Options.MetricsServer {
+		return NewMetricsCollection(
+			s.metricFuncServerUptimeCounter,
+			s.metricFuncComputeDBSizes,
+			s.metricFuncComputeDBEntries,
+		)
+	}
+	return nil
+}
+
 func (s *ImmuServer) setUpMetricsServer() error {
-	s.metricsServer = StartMetrics(
+	s.metricsServer = s.metricsCollection.StartServer(
 		1*time.Minute,
 		s.Options.MetricsBind(),
 		s.Logger,
-		s.metricFuncServerUptimeCounter,
-		s.metricFuncComputeDBSizes,
-		s.metricFuncComputeDBEntries,
 	)
 	return nil
 }
@@ -366,6 +377,19 @@ func (s *ImmuServer) printUsageCallToAction() {
 			"You can now use immuadmin and immuclient CLIs to login with the %s superadmin user and start using immudb.\n",
 			auth.SysAdminUsername)
 	}
+}
+
+func (s *ImmuServer) storeOptionsForDB(name string, remoteStorage remotestorage.Storage, stOpts *store.Options) *store.Options {
+	stOpts = s.setupStoreOptionsForRemoteStorage(name, remoteStorage, stOpts)
+	stOpts = s.setupStoreOptionsForMetrics(name, stOpts)
+	return stOpts
+}
+
+func (s *ImmuServer) setupStoreOptionsForMetrics(name string, stOpts *store.Options) *store.Options {
+	if s.metricsCollection != nil {
+		stOpts.WithMetrics(s.metricsCollection.storeMetrics(name))
+	}
+	return stOpts
 }
 
 func (s *ImmuServer) loadSystemDatabase(dataDir string, remoteStorage remotestorage.Storage, adminPassword string) error {

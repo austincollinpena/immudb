@@ -23,8 +23,6 @@ import (
 
 	"github.com/codenotary/immudb/embedded/tbtree"
 	"github.com/codenotary/immudb/embedded/watchers"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type indexer struct {
@@ -45,6 +43,8 @@ type indexer struct {
 
 	compactionMutex sync.Mutex
 	mutex           sync.Mutex
+
+	metrics Metrics
 }
 
 type runningState = int
@@ -55,22 +55,7 @@ const (
 	paused
 )
 
-var (
-	metricsIndexingLastIndexed = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "immudb_indexed_trx_id",
-		Help: "The highest id of indexed transaction",
-	}, []string{
-		"path",
-	})
-	metricsIndexingMaxTrx = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "immudb_max_trx_id",
-		Help: "The highest id of committed transaction",
-	}, []string{
-		"path",
-	})
-)
-
-func newIndexer(path string, store *ImmuStore, indexOpts *tbtree.Options, maxWaitees int) (*indexer, error) {
+func newIndexer(path string, store *ImmuStore, indexOpts *tbtree.Options, maxWaitees int, metrics Metrics) (*indexer, error) {
 	index, err := tbtree.Open(path, indexOpts)
 	if err != nil {
 		return nil, err
@@ -94,6 +79,7 @@ func newIndexer(path string, store *ImmuStore, indexOpts *tbtree.Options, maxWai
 		wHub:      wHub,
 		state:     stopped,
 		stateCond: sync.NewCond(&sync.Mutex{}),
+		metrics:   metrics,
 	}
 
 	indexer.resume()
@@ -286,8 +272,12 @@ func (idx *indexer) Pause() {
 }
 
 func (idx *indexer) doIndexing(cancellation <-chan struct{}) {
+	committedTxID, _, _ := idx.store.commitState()
+	idx.metrics.LastCommittedTrx(committedTxID)
+
 	for {
 		lastIndexedTx := idx.index.Ts()
+		idx.metrics.LastIndexedTrx(lastIndexedTx)
 
 		if idx.wHub != nil {
 			idx.wHub.DoneUpto(lastIndexedTx)
@@ -303,7 +293,7 @@ func (idx *indexer) doIndexing(cancellation <-chan struct{}) {
 		}
 
 		committedTxID, _, _ := idx.store.commitState()
-		metricsIndexingMaxTrx.WithLabelValues(idx.path).Set(float64(committedTxID))
+		idx.metrics.LastCommittedTrx(committedTxID)
 
 		txsToIndex := committedTxID - lastIndexedTx
 		idx.store.notify(Info, false, "%d transaction/s to be indexed at '%s'", txsToIndex, idx.store.path)
@@ -400,7 +390,7 @@ func (idx *indexer) indexSince(txID uint64, limit int) error {
 			return err
 		}
 
-		metricsIndexingLastIndexed.WithLabelValues(idx.path).Set(float64(txID + uint64(i)))
+		idx.metrics.LastIndexedTrx(txID + uint64(i))
 	}
 
 	return nil
